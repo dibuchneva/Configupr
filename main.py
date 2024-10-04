@@ -1,106 +1,121 @@
 import os
-import zipfile
 import sys
+import argparse
+import tarfile
 
+class ShellEmulator:
+    def __init__(self, username, hostname, vfs_path, startup_script):
+        self.username = username
+        self.hostname = hostname
+        self.vfs_path = vfs_path
+        self.startup_script = startup_script
+        self.current_directory = '/'
+        self.virtual_fs = self._extract_vfs()
 
-class SimpleShell:
-    def __init__(self, zip_path):
-        self.zip_path = zip_path
-        self.file_system = {}
+    def _extract_vfs(self):
+        with tarfile.open(self.vfs_path, 'r') as tar:
+            tar.extractall(path='/tmp/virtual_fs')
+        return '/tmp/virtual_fs'
 
-        if not zipfile.is_zipfile(zip_path):
-            raise ValueError("Provided file is not a valid zip file.")
+    def _get_prompt(self):
+        return f"{self.username}@{self.hostname}:{self.current_directory}$ "
 
-        # Загрузка виртуальной файловой системы
-        self.load_virtual_file_system()
+    def _ls(self):
+        try:
+            items = os.listdir(os.path.join(self.virtual_fs, self.current_directory.strip('/')))
+            return "\n".join(items)
+        except FileNotFoundError:
+            return "No such directory"
 
-    def load_virtual_file_system(self):
-        with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
-            self.file_system = {name: zip_ref.read(name) for name in zip_ref.namelist()}
-
-    def list_files(self):
-        print("Содержимое виртуальной файловой системы:")
-        for filename in self.file_system.keys():
-            print(f"- {filename}")
-
-    def cat(self, filename):
-        if filename in self.file_system:
-            print(self.file_system[filename].decode())
+    def _cd(self, dir_name):
+        target_path = os.path.join(self.virtual_fs, self.current_directory.strip('/'), dir_name)
+        if os.path.isdir(target_path):
+            self.current_directory = os.path.join(self.current_directory, dir_name)
         else:
-            print("Ошибка: Файл не найден.")
+            return "No such directory"
 
-    def change_directory(self, directory):
-        if directory == "..":
-            if self.current_dir:
-                self.current_dir = '/'.join(self.current_dir.split('/')[:-1])
-        elif directory in self.file_system:
-            self.current_dir = directory if directory.endswith('/') else directory + '/'
+    def _rmdir(self, dir_name):
+        target_path = os.path.join(self.virtual_fs, self.current_directory.strip('/'), dir_name)
+        if os.path.isdir(target_path):
+            try:
+                os.rmdir(target_path)
+            except OSError:
+                return "Directory not empty"
         else:
-            print(f"cd: {directory}: Файл не найден")
-
-    def tac(self, filename):
-        if filename in self.file_system:
-            content = self.file_system[filename].decode('utf-8').splitlines()
-            for line in reversed(content):
-                print(line)
+            return "No such directory"
+    def _tac(self, filename):
+        full_path = os.path.join(self.virtual_fs, self.current_directory.strip('/'), filename)
+        if os.path.isfile(full_path):
+            with open(full_path, 'r') as file:
+                lines = file.readlines()
+                return '\n'.join(reversed(lines))
         else:
-            print(f"tac: {filename}: Файл не найден")
+            return "No such file"
 
-    def rmdir(self, directory):
-        # Check if the directory is empty (i.e., has no files)
-        is_empty = all(not filename.startswith(directory) for filename in self.file_system.keys())
-        if is_empty:
-            # Remove the directory by just changing the current directory's representation
-            print(f"Удаленная директория: {directory}")
-        else:
-            print(f"rmdir: {directory}: Директория не пуста")
+    def _exit(self):
+        print("Exiting the shell emulator.")
+        sys.exit()
 
-    def run_command(self, command):
-        parts = command.split()
-        if not parts:
+    def _execute_command(self, cmd):
+        tokens = cmd.split()
+        if not tokens:
             return
 
-        cmd = parts[0]
-
-        if cmd == 'ls':
-            self.list_files()
-        elif cmd == 'cat':
-            if len(parts) < 2:
-                print("Использование: cat <имя файла>")
+        command = tokens[0]
+        if command == 'ls':
+            return self._ls()
+        elif command == 'cd':
+            if len(tokens) > 1:
+                self._cd(tokens[1])
             else:
-                self.cat(parts[1])
-        elif cmd.startswith("cd"):
-            if len(parts) > 1:
-                self.change_directory(parts[1])
+                return "cd: missing argument"
+        elif command == 'rmdir':
+            if len(tokens) == 2:
+                self._rmdir(tokens[1])
             else:
-                print("cd: отстутсвует аргумент")
-        elif cmd == 'tac':
-            if len(parts) > 1:
-                self.tac(parts[1])
+                return "rmdir: missing directory operand"
+        elif command == 'tac':
+            if len(tokens) == 2:
+                return self._tac(tokens[1])
             else:
-                print("tac: пропущен аргумент файл")
-        elif cmd.startswith("rmdir"):
-            if len(parts) > 1:
-                self.rmdir(parts[1])
-            else:
-                print("rmdir: пропущен аргумент директория")
-        elif cmd == 'exit':
-            sys.exit(0)
+                return "tac: missing file operand"
+        elif command == 'exit':
+            self._exit()
         else:
-            print(f"Ошибка: команда '{cmd}' не найдена.")
+            return f"{command}: command not found"
 
-    def start(self):
-        print(f"Эмулятор оболочки запущен. Используйте 'ls' для отображения файлов и 'exit' для выхода.")
+
+    def run(self):
+        if self.startup_script:
+            with open(self.startup_script, 'r') as script:
+                for line in script:
+                    output = self._execute_command(line.strip())
+                    if output:
+                        print(output)
+
         while True:
-            command = input("$> ")
-            self.run_command(command)
+            try:
+                cmd = input(self._get_prompt())
+                output = self._execute_command(cmd)
+                if output:
+                    print(output)
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                break
+
+def main():
+    parser = argparse.ArgumentParser(description='Shell Emulator')
+    parser.add_argument('username', help='Username for prompt')
+    parser.add_argument('hostname', help='Hostname for prompt')
+    parser.add_argument('vfs_path', help='Path to virtual file system (tar file)')
+    parser.add_argument('startup_script', help='Path to startup script file')
+
+    args = parser.parse_args()
 
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Использование: python shell_emulator.py <путь к zip файлу>")
-        sys.exit(1)
+    emulator = ShellEmulator(args.username, args.hostname, args.vfs_path, args.startup_script)
+    emulator.run()
 
-    zip_file_path = sys.argv[1]
-    shell = SimpleShell(zip_file_path)
-    shell.start()
+if __name__ == '__main__':
+    main()
